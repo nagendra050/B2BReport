@@ -1,96 +1,151 @@
-var bestRecords = new Dictionary<string, (string FileName, DateTime FileDate, int SequenceOrder, List<string> Block, DateTime EffectiveDate)>(StringComparer.OrdinalIgnoreCase);
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
 
-for (int fileIndex = 0; fileIndex < files.Count; fileIndex++)
+public class DailyFile
 {
-    var file = files[fileIndex];
-    var lines = File.ReadAllLines(file.FileName);
+    public string FileName { get; set; }
+    public DateTime FileDate { get; private set; }
+    public string TTime { get; private set; }
+    public int _originalMemberCount { get; set; }
 
-    List<string> currentBlock = null;
-    string currentDtsId = null;
-    DateTime currentEffectiveDate = DateTime.MinValue;
-
-    foreach (var line in lines)
+    public DailyFile(string filename)
     {
-        if (line.StartsWith("DTS"))
+        FileName = filename;
+        TTime = "";
+
+        try
         {
-            // finalize previous block
+            var fn = Path.GetFileName(filename);
+            var parts = fn.Split('.');
+            var datePart = parts.First(p => p.StartsWith("D")).Substring(1); // e.g. "250330"
+            FileDate = DateTime.ParseExact(datePart, "yyMMdd", CultureInfo.InvariantCulture);
+
+            var timePart = parts.First(p => p.StartsWith("T")).Substring(1);
+            TTime = timePart;
+
+            _originalMemberCount = 0;
+        }
+        catch
+        {
+            FileDate = DateTime.MinValue;
+            TTime = "";
+            _originalMemberCount = 0;
+        }
+    }
+}
+
+public class RecordProcessor
+{
+    public static List<DailyFile> ProcessFiles(List<DailyFile> files)
+    {
+        // Global dictionary of best blocks across all files
+        var globalBest = new Dictionary<string, (string FileName, DateTime FileDate, int SequenceOrder, List<string> Block, DateTime EffectiveDate)>(StringComparer.OrdinalIgnoreCase);
+
+        for (int fileIndex = 0; fileIndex < files.Count; fileIndex++)
+        {
+            var file = files[fileIndex];
+            var lines = File.ReadAllLines(file.FileName);
+
+            // Stage 1: Deduplicate within this file
+            var localBest = new Dictionary<string, (List<string> Block, DateTime EffectiveDate)>(StringComparer.OrdinalIgnoreCase);
+
+            List<string> currentBlock = null;
+            string currentDtsId = null;
+            DateTime currentEffectiveDate = DateTime.MinValue;
+
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("DTS"))
+                {
+                    // finalize previous block
+                    if (currentBlock != null && currentDtsId != null)
+                    {
+                        if (!localBest.ContainsKey(currentDtsId) ||
+                            currentEffectiveDate > localBest[currentDtsId].EffectiveDate)
+                        {
+                            localBest[currentDtsId] = (currentBlock, currentEffectiveDate);
+                        }
+                    }
+
+                    // start new block
+                    currentBlock = new List<string> { line };
+                    currentDtsId = line.Split(' ')[0];
+
+                    // parse effective date safely
+                    var lastToken = line.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
+                    string rawDate = lastToken.Length >= 8 ? lastToken.Substring(0, 8) : "";
+                    DateTime parsedDate;
+                    currentEffectiveDate = DateTime.TryParseExact(rawDate, "yyyyMMdd", CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out parsedDate) ? parsedDate : DateTime.MinValue;
+                }
+                else if (currentBlock != null)
+                {
+                    currentBlock.Add(line);
+                }
+            }
+
+            // finalize last block in file
             if (currentBlock != null && currentDtsId != null)
             {
-                // compare and replace immediately
-                if (!bestRecords.ContainsKey(currentDtsId))
+                if (!localBest.ContainsKey(currentDtsId) ||
+                    currentEffectiveDate > localBest[currentDtsId].EffectiveDate)
                 {
-                    bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                    localBest[currentDtsId] = (currentBlock, currentEffectiveDate);
+                }
+            }
+
+            // Stage 2: Merge local best into global best
+            foreach (var kvp in localBest)
+            {
+                string dtsId = kvp.Key;
+                var block = kvp.Value.Block;
+                var effDate = kvp.Value.EffectiveDate;
+
+                if (!globalBest.ContainsKey(dtsId))
+                {
+                    globalBest[dtsId] = (file.FileName, file.FileDate, fileIndex, block, effDate);
                 }
                 else
                 {
-                    var existing = bestRecords[currentDtsId];
-                    if (currentEffectiveDate > existing.EffectiveDate ||
-                        (currentEffectiveDate == existing.EffectiveDate && file.FileDate > existing.FileDate) ||
-                        (currentEffectiveDate == existing.EffectiveDate && file.FileDate == existing.FileDate && fileIndex > existing.SequenceOrder))
+                    var existing = globalBest[dtsId];
+                    if (effDate > existing.EffectiveDate ||
+                        (effDate == existing.EffectiveDate && file.FileDate > existing.FileDate) ||
+                        (effDate == existing.EffectiveDate && file.FileDate == existing.FileDate && fileIndex > existing.SequenceOrder))
                     {
-                        bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                        globalBest[dtsId] = (file.FileName, file.FileDate, fileIndex, block, effDate);
                     }
                 }
             }
-
-            // start new block
-            currentBlock = new List<string> { line };
-            currentDtsId = line.Split(' ')[0]; // "DTS123"
-
-            // parse effective date safely
-            var lastToken = line.Split(' ', StringSplitOptions.RemoveEmptyEntries).Last();
-            string rawDate = lastToken.Length >= 8 ? lastToken.Substring(0, 8) : "";
-            DateTime parsedDate;
-            currentEffectiveDate = DateTime.TryParseExact(rawDate, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsedDate)
-                ? parsedDate : DateTime.MinValue;
         }
-        else if (currentBlock != null)
-        {
-            currentBlock.Add(line);
-        }
-    }
 
-    // finalize last block
-    if (currentBlock != null && currentDtsId != null)
-    {
-        if (!bestRecords.ContainsKey(currentDtsId))
+        // Build final result list
+        var resultFiles = new List<DailyFile>();
+        foreach (var group in globalBest.Values.GroupBy(r => r.FileName))
         {
-            bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
-        }
-        else
-        {
-            var existing = bestRecords[currentDtsId];
-            if (currentEffectiveDate > existing.EffectiveDate ||
-                (currentEffectiveDate == existing.EffectiveDate && file.FileDate > existing.FileDate) ||
-                (currentEffectiveDate == existing.EffectiveDate && file.FileDate == existing.FileDate && fileIndex > existing.SequenceOrder))
+            var df = new DailyFile(group.Key);
+            var mergedLines = new List<string>();
+            foreach (var record in group)
             {
-                bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                mergedLines.AddRange(record.Block);
+            }
+            df._originalMemberCount = mergedLines.Count;
+            resultFiles.Add(df);
+        }
+
+        // Add empty files (those that lost all blocks)
+        foreach (var file in files)
+        {
+            if (!resultFiles.Any(f => f.FileName == file.FileName))
+            {
+                var emptyFile = new DailyFile(file.FileName);
+                emptyFile._originalMemberCount = 0;
+                resultFiles.Add(emptyFile);
             }
         }
-    }
-}
 
-// ✅ Build final DailyFile list — only winning blocks per file
-var resultFiles = new List<DailyFile>();
-foreach (var group in bestRecords.Values.GroupBy(r => r.FileName))
-{
-    var df = new DailyFile(group.Key);
-    var mergedLines = new List<string>();
-    foreach (var record in group)
-    {
-        mergedLines.AddRange(record.Block);
-    }
-    df._originalMemberCount = mergedLines.Count;
-    resultFiles.Add(df);
-}
-
-// Add empty files too
-foreach (var file in files)
-{
-    if (!resultFiles.Any(f => f.FileName == file.FileName))
-    {
-        var emptyFile = new DailyFile(file.FileName);
-        emptyFile._originalMemberCount = 0;
-        resultFiles.Add(emptyFile);
+        return resultFiles;
     }
 }
