@@ -9,7 +9,6 @@ public class DailyFile
     public string FileName { get; set; }
     public DateTime FileDate { get; private set; }
     public string TTime { get; private set; }
-    public int _originalMemberCount { get; set; }
 
     public DailyFile(string filename)
     {
@@ -25,21 +24,18 @@ public class DailyFile
 
             var timePart = parts.First(p => p.StartsWith("T")).Substring(1);
             TTime = timePart;
-
-            _originalMemberCount = 0;
         }
         catch
         {
             FileDate = DateTime.MinValue;
             TTime = "";
-            _originalMemberCount = 0;
         }
     }
 }
 
 public class RecordProcessor
 {
-    public static List<DailyFile> ProcessFiles(List<DailyFile> files)
+    public static Dictionary<string, List<string>> ProcessFiles(List<DailyFile> files)
     {
         // Global dictionary of best blocks across all files
         var globalBest = new Dictionary<string, (string FileName, DateTime FileDate, int SequenceOrder, List<string> Block, DateTime EffectiveDate)>(StringComparer.OrdinalIgnoreCase);
@@ -163,11 +159,10 @@ public class RecordProcessor
             }
         }
 
-        // Build final result list
-        var resultFiles = new List<DailyFile>();
+        // Build final result list: dictionary mapping fileName → merged lines
+        var resultFiles = new Dictionary<string, List<string>>();
         foreach (var group in globalBest.Values.GroupBy(r => r.FileName))
         {
-            var df = new DailyFile(group.Key);
             var mergedLines = new List<string>();
             foreach (var record in group)
             {
@@ -183,18 +178,15 @@ public class RecordProcessor
                 }
             }
 
-            df._originalMemberCount = mergedLines.Count;
-            resultFiles.Add(df);
+            resultFiles[group.Key] = mergedLines;
         }
 
         // Add empty files (those that lost all valid blocks but may have invalid ones)
         foreach (var file in files)
         {
-            if (!resultFiles.Any(f => f.FileName == file.FileName))
+            if (!resultFiles.ContainsKey(file.FileName))
             {
-                var df = new DailyFile(file.FileName);
                 var mergedLines = new List<string>();
-
                 if (invalidBlocksPerFile.ContainsKey(file.FileName))
                 {
                     foreach (var invalidBlock in invalidBlocksPerFile[file.FileName])
@@ -202,9 +194,7 @@ public class RecordProcessor
                         mergedLines.AddRange(invalidBlock);
                     }
                 }
-
-                df._originalMemberCount = mergedLines.Count;
-                resultFiles.Add(df);
+                resultFiles[file.FileName] = mergedLines;
             }
         }
 
