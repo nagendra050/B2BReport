@@ -1,42 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.IO;
-using System.Linq;
-
-public class DailyFile
-{
-    public string FileName { get; set; }
-    public DateTime FileDate { get; private set; }
-    public string TTime { get; private set; }
-
-    // Store the surviving lines after deduplication
-    public List<string> Lines { get; set; }
-
-    public DailyFile(string filename)
-    {
-        FileName = filename;
-        TTime = "";
-        Lines = new List<string>();
-
-        try
-        {
-            var fn = Path.GetFileName(filename);
-            var parts = fn.Split('.');
-            var datePart = parts.First(p => p.StartsWith("D")).Substring(1); // e.g. "250330"
-            FileDate = DateTime.ParseExact(datePart, "yyMMdd", CultureInfo.InvariantCulture);
-
-            var timePart = parts.First(p => p.StartsWith("T")).Substring(1);
-            TTime = timePart;
-        }
-        catch
-        {
-            FileDate = DateTime.MinValue;
-            TTime = "";
-        }
-    }
-}
-
 public class RecordProcessor
 {
     public static List<DailyFile> ProcessFiles(List<DailyFile> files)
@@ -58,7 +19,7 @@ public class RecordProcessor
 
             foreach (var line in lines)
             {
-                if (line.StartsWith("DTS"))
+                if (line.StartsWith("DTL"))
                 {
                     // finalize previous block
                     if (currentBlock != null && currentDtsId != null)
@@ -78,6 +39,7 @@ public class RecordProcessor
                             else
                             {
                                 var existing = localBest[currentDtsId];
+                                // ✅ Deduplication inside same file
                                 if (currentEffectiveDate > existing.EffectiveDate ||
                                     (currentEffectiveDate == existing.EffectiveDate && entryCounter > existing.EntryOrderInFile))
                                 {
