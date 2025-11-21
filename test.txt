@@ -1,0 +1,110 @@
+ public static List<DailyFile> ProcessFiles(List<DailyFile> files)
+    {
+        // Dictionary keyed by DTS ID → ensures O(1) lookup for deduplication
+        var bestRecords = new Dictionary<string, (string FileName, DateTime FileDate, int SequenceOrder, List<string> Block, DateTime EffectiveDate)>(StringComparer.OrdinalIgnoreCase);
+
+        for (int fileIndex = 0; fileIndex < files.Count; fileIndex++)
+        {
+            var file = files[fileIndex];
+            var lines = File.ReadAllLines(file.FileName); // read file content
+            List<string> currentBlock = null;
+            string currentDtsId = null;
+            DateTime currentEffectiveDate = DateTime.MinValue;
+
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("DTS"))
+                {
+                    // finalize previous block
+                    if (currentBlock != null && currentDtsId != null)
+                    {
+                        if (!bestRecords.ContainsKey(currentDtsId))
+                        {
+                            bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                        }
+                        else
+                        {
+                            var existing = bestRecords[currentDtsId];
+
+                            // Rule 1: latest effective date wins
+                            if (currentEffectiveDate > existing.EffectiveDate)
+                            {
+                                bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                            }
+                            // Rule 2: same effective date → later file date wins
+                            else if (currentEffectiveDate == existing.EffectiveDate)
+                            {
+                                if (file.FileDate > existing.FileDate)
+                                {
+                                    bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                                }
+                                // Rule 3: same file date → later sequence order wins
+                                else if (file.FileDate == existing.FileDate && fileIndex > existing.SequenceOrder)
+                                {
+                                    bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                                }
+                            }
+                        }
+                    }
+
+                    // start new block
+                    currentBlock = new List<string> { line };
+                    currentDtsId = line.Split(' ')[0]; // "DTS123"
+
+                    // parse effective date from last token of DTS line
+                    var tokens = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    string rawDate = tokens.Last().Substring(0, 8); // "20250401"
+                    currentEffectiveDate = DateTime.ParseExact(rawDate, "yyyyMMdd", CultureInfo.InvariantCulture);
+                }
+                else if (currentBlock != null)
+                {
+                    currentBlock.Add(line);
+                }
+            }
+
+            // finalize last block in file
+            if (currentBlock != null && currentDtsId != null)
+            {
+                if (!bestRecords.ContainsKey(currentDtsId))
+                {
+                    bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                }
+                else
+                {
+                    var existing = bestRecords[currentDtsId];
+
+                    if (currentEffectiveDate > existing.EffectiveDate)
+                    {
+                        bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                    }
+                    else if (currentEffectiveDate == existing.EffectiveDate)
+                    {
+                        if (file.FileDate > existing.FileDate)
+                        {
+                            bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                        }
+                        else if (file.FileDate == existing.FileDate && fileIndex > existing.SequenceOrder)
+                        {
+                            bestRecords[currentDtsId] = (file.FileName, file.FileDate, fileIndex, currentBlock, currentEffectiveDate);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ✅ Build final DailyFile list
+        var resultFiles = new List<DailyFile>();
+        foreach (var group in bestRecords.Values.GroupBy(r => r.FileName))
+        {
+            var df = new DailyFile(group.Key);
+            var mergedLines = new List<string>();
+            foreach (var record in group)
+            {
+                mergedLines.AddRange(record.Block);
+            }
+            df._originalMemberCount = mergedLines.Count;
+            resultFiles.Add(df);
+        }
+
+        return resultFiles;
+    }
